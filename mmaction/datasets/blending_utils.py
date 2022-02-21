@@ -141,3 +141,97 @@ class CutmixBlending(BaseMiniBatchBlending):
         label = lam * label + (1 - lam) * label[rand_index, :]
 
         return imgs, label
+
+
+
+@BLENDINGS.register_module()
+class LabelSmoothing(BaseMiniBatchBlending):
+    def do_blending(self, imgs, label, **kwargs):
+        return imgs, label
+
+
+@BLENDINGS.register_module()
+class MViTBlending(BaseMiniBatchBlending):
+    """Implementing Cutmix in a mini-batch.
+    This module is proposed in `CutMix: Regularization Strategy to Train Strong
+    Classifiers with Localizable Features <https://arxiv.org/abs/1905.04899>`_.
+    Code Reference https://github.com/clovaai/CutMix-PyTorch
+    Args:
+        num_classes (int): The number of classes.
+        alpha (float): Parameters for Beta distribution.
+    """
+
+    def __init__(self, num_classes=400, smoothing=0.1, mixup_alpha=.8, cutmix_alpha=0.2, switch_prob=0.5):
+        super().__init__(num_classes=num_classes, smoothing=smoothing)
+        self.mixup_beta = Beta(mixup_alpha, mixup_alpha)
+        self.cutmix_beta = Beta(cutmix_alpha, cutmix_alpha)
+        self.switch_prob = switch_prob
+
+    @staticmethod
+    def rand_bbox(img_size, lam):
+        """Generate a random boudning box."""
+        w = img_size[-1]
+        h = img_size[-2]
+        cut_rat = torch.sqrt(1. - lam)
+        cut_w = torch.tensor(int(w * cut_rat))
+        cut_h = torch.tensor(int(h * cut_rat))
+
+        # uniform
+        cx = torch.randint(w, (1, ))[0]
+        cy = torch.randint(h, (1, ))[0]
+
+        bbx1 = torch.clamp(cx - cut_w // 2, 0, w)
+        bby1 = torch.clamp(cy - cut_h // 2, 0, h)
+        bbx2 = torch.clamp(cx + cut_w // 2, 0, w)
+        bby2 = torch.clamp(cy + cut_h // 2, 0, h)
+
+        return bbx1, bby1, bbx2, bby2
+
+    def do_cutmix(self, imgs, label, **kwargs):
+        """Blending images with cutmix."""
+        assert len(kwargs) == 0, f'unexpected kwargs for cutmix {kwargs}'
+
+        batch_size = imgs.size(0)
+        rand_index = torch.randperm(batch_size)
+        lam = self.cutmix_beta.sample()
+
+        bbx1, bby1, bbx2, bby2 = self.rand_bbox(imgs.size(), lam)
+        imgs[:, ..., bby1:bby2, bbx1:bbx2] = imgs[rand_index, ..., bby1:bby2,
+                                                  bbx1:bbx2]
+        lam = 1 - (1.0 * (bbx2 - bbx1) * (bby2 - bby1) /
+                   (imgs.size()[-1] * imgs.size()[-2]))
+
+        label = lam * label + (1 - lam) * label[rand_index, :]
+        return imgs, label
+
+    def do_mixup(self, imgs, label, **kwargs):
+        """Blending images with mixup."""
+        assert len(kwargs) == 0, f'unexpected kwargs for mixup {kwargs}'
+
+        lam = self.mixup_beta.sample()
+        batch_size = imgs.size(0)
+        rand_index = torch.randperm(batch_size)
+
+        mixed_imgs = lam * imgs + (1 - lam) * imgs[rand_index, :]
+        mixed_label = lam * label + (1 - lam) * label[rand_index, :]
+
+        return mixed_imgs, mixed_label
+
+    def do_blending(self, imgs, label, **kwargs):
+        """Blending images with MViT style. Cutmix for half for mixup for the other half."""
+        assert len(kwargs) == 0, f'unexpected kwargs for cutmix_half_mixup {kwargs}'
+        # import pdb
+        # pdb.set_trace()
+        # batch_size = imgs.size(0)
+        # half = batch_size // 2
+        # rand_index = torch.randperm(batch_size)
+        # idx1, idx2 = rand_index[:half], rand_index[half:]
+        # img1, label1 = self.do_cutmix(imgs[idx1, :], label[idx1, :])
+        # img2, label2 = self.do_mixup(imgs[idx2, :], label[idx2, :])
+        # imgs = torch.cat((img1, img2))
+        # label = torch.cat((label1, label2)) 
+        if np.random.rand() < self.switch_prob :
+            return self.do_cutmix(imgs, label)
+        else:
+            return self.do_mixup(imgs, label)
+        # return imgs, label
